@@ -1,0 +1,721 @@
+Yes. Let's **start again from `KeyGen.py` and do the Reverse Engineering lab step-by-step**, including the reasoning behind every step, so you can explain it yourself in the test.
+
+The uploaded walkthrough says the challenge is an ARM64 `sentinel-activate` binary, and the goal is to understand `derive_key()` well enough to generate a valid license key. 
+
+## Part 1 — First understand what we are trying to find
+
+The final objective is:
+
+```text
+account name
+     ↓
+derive_key()
+     ↓
+valid license key
+     ↓
+admin account
+     ↓
+flag
+```
+
+The important thing is:
+
+> **We don't guess the admin key. We reverse the algorithm that generates it.**
+
+The walkthrough explicitly says the algorithm can generate a valid key for **any account name**. 
+
+---
+
+# Step 1 — Get the binary
+
+From the lab website, download:
+
+```text
+sentinel-activate
+```
+
+Check it:
+
+```bash
+file sentinel-activate
+```
+
+You should see something similar to:
+
+```text
+ELF 64-bit LSB executable, ARM aarch64
+```
+
+### Why?
+
+We need to know what architecture we're reversing.
+
+Here:
+
+```text
+ARM aarch64
+```
+
+means the instructions are ARM64 instructions.
+
+The binary is also:
+
+```text
+not stripped
+```
+
+That's very useful because function names remain available. 
+
+---
+
+# Step 2 — Look at strings
+
+Run:
+
+```bash
+strings sentinel-activate
+```
+
+Don't just scroll randomly.
+
+Look for useful words:
+
+```text
+decode_token
+derive_key
+validate
+g_token_enc
+--account
+--key
+--diag
+User Flag: %s
+```
+
+The walkthrough identifies these exact strings. 
+
+### Why are these important?
+
+They give us a roadmap:
+
+```text
+decode_token → probably handles hidden token/flag
+
+derive_key → probably generates license key
+
+validate → probably checks license
+
+main → program entry/argument handling
+```
+
+So instead of reversing the entire 70 KB binary, we can concentrate on these functions.
+
+---
+
+# Step 3 — Inspect the symbols
+
+Run:
+
+```bash
+aarch64-linux-gnu-objdump -t sentinel-activate
+```
+
+Look for:
+
+```text
+decode_token
+derive_key
+validate
+main
+```
+
+The walkthrough gives these addresses:
+
+```text
+decode_token → 0x400744
+derive_key   → 0x4007b0
+validate     → 0x4009f8
+main         → 0x400ac4
+```
+
+
+
+### Why?
+
+Because the binary is not stripped.
+
+Instead of seeing:
+
+```text
+sub_4007b0
+```
+
+we can see:
+
+```text
+derive_key
+```
+
+That tells us exactly where to investigate.
+
+---
+
+# Step 4 — Find the hidden flag mechanism
+
+Before `KeyGen.py`, there is another important discovery.
+
+We found:
+
+```text
+g_token_enc
+```
+
+The walkthrough says it is a **36-byte blob** at:
+
+```text
+0x400cc0
+```
+
+
+
+The function responsible is:
+
+```text
+decode_token
+```
+
+---
+
+# Step 5 — Understand `decode_token`
+
+The relevant ARM64 instructions are:
+
+```text
+ldrb
+mov ... 0x5a
+eor
+strb
+```
+
+The important instruction is:
+
+```text
+eor
+```
+
+`EOR` is ARM64's XOR operation.
+
+The function essentially does:
+
+```text
+encoded_byte XOR 0x5A
+```
+
+for every byte.
+
+So:
+
+```text
+g_token_enc
+     ↓
+XOR every byte with 0x5A
+     ↓
+decoded text
+     ↓
+UUID
+     ↓
+USER FLAG
+```
+
+The walkthrough explicitly states that the decoded 36-byte result is the user flag. 
+
+### Important lesson
+
+This is why simply running:
+
+```bash
+strings sentinel-activate
+```
+
+may not reveal the flag.
+
+The flag is **obfuscated**.
+
+---
+
+# Step 6 — Now move to `derive_key`
+
+This is where `KeyGen.py` becomes important.
+
+Find/disassemble `derive_key`:
+
+```bash
+aarch64-linux-gnu-objdump -d sentinel-activate
+```
+
+You want to study the section around:
+
+```text
+derive_key
+```
+
+The walkthrough tells us exactly what the function does.
+
+It starts with:
+
+```text
+6-byte buffer = zeros
+```
+
+Then processes every character in the account name.
+
+---
+
+# Step 7 — Follow ONE character
+
+Suppose the account is:
+
+```text
+admin
+```
+
+Take the first character:
+
+```text
+a
+```
+
+Its ASCII value is:
+
+```text
+97
+```
+
+The algorithm transforms that value.
+
+The walkthrough says:
+
+```text
+character
+ ↓
+multiply by 27
+ ↓
+add 61
+ ↓
+XOR 71
+ ↓
+add character index
+ ↓
+XOR account length
+```
+
+
+
+---
+
+# Step 8 — Understand ×27
+
+The Python implementation from the walkthrough represents multiplication by 27 as:
+
+```text
+(c << 1) + c
+```
+
+That gives:
+
+```text
+c × 3
+```
+
+Then:
+
+```text
+(c << 3) + c
+```
+
+That gives:
+
+```text
+c × 9
+```
+
+Together:
+
+```text
+3 × 9 = 27
+```
+
+So:
+
+```text
+c × 27
+```
+
+The source walkthrough explicitly shows this implementation. 
+
+---
+
+# Step 9 — Add 61
+
+Next:
+
+```text
+c = c + 61
+```
+
+The implementation uses:
+
+```python
+(c + 0x3d) & 0xFF
+```
+
+because:
+
+```text
+0x3d = 61
+```
+
+and:
+
+```text
+& 0xFF
+```
+
+keeps the result within one byte.
+
+---
+
+# Step 10 — XOR with 71
+
+Next:
+
+```text
+c = c XOR 71
+```
+
+In hexadecimal:
+
+```text
+71 decimal = 0x47
+```
+
+So the Python representation is:
+
+```python
+c ^ 0x47
+```
+
+The walkthrough explicitly documents this operation. 
+
+---
+
+# Step 11 — Add the character index
+
+Next:
+
+```text
+c = c + i
+```
+
+Where:
+
+```text
+i = character position
+```
+
+For:
+
+```text
+admin
+```
+
+the indexes are:
+
+```text
+a → 0
+d → 1
+m → 2
+i → 3
+n → 4
+```
+
+So the first character gets:
+
+```text
++0
+```
+
+the second:
+
+```text
++1
+```
+
+and so on.
+
+---
+
+# Step 12 — XOR with account length
+
+`admin` contains:
+
+```text
+5 characters
+```
+
+Therefore:
+
+```text
+name_len = 5
+```
+
+Each transformed character is then:
+
+```text
+c XOR 5
+```
+
+The walkthrough confirms that the account-name length is used in this operation. 
+
+---
+
+# Step 13 — Put the result into the 6-byte buffer
+
+This is the clever part.
+
+The program has:
+
+```text
+buf[0]
+buf[1]
+buf[2]
+buf[3]
+buf[4]
+buf[5]
+```
+
+Initially:
+
+```text
+0 0 0 0 0 0
+```
+
+For each character:
+
+```text
+buf[j] = buf[j] XOR c
+```
+
+Then:
+
+```text
+j = j + 1
+```
+
+When `j` reaches 6:
+
+```text
+j = 0
+```
+
+So the position **rotates**.
+
+The walkthrough calls this a:
+
+> rotating 6-byte buffer
+
+
+
+---
+
+# Step 14 — Convert the buffer to hexadecimal
+
+After all characters are processed, we have:
+
+```text
+6 bytes
+```
+
+Each byte becomes:
+
+```text
+2 hexadecimal characters
+```
+
+Therefore:
+
+```text
+6 × 2 = 12 hex characters
+```
+
+Example structure:
+
+```text
+A1B2C3D4E5F6
+```
+
+The program then formats those 12 characters as:
+
+```text
+SENT-A1B2-C3D4-E5F6
+```
+
+The walkthrough confirms this final format. 
+
+---
+
+# Step 15 — Now `KeyGen.py`
+
+Now we understand **why** we write the Python script.
+
+We're not using Python to magically crack the binary.
+
+We're translating what we learned from the ARM64 assembly into Python:
+
+```text
+ARM64 instructions
+       ↓
+understand operations
+       ↓
+rewrite same operations in Python
+       ↓
+KeyGen.py
+       ↓
+license key
+```
+
+That is the essence of reverse engineering.
+
+---
+
+# Step 16 — The KeyGen algorithm
+
+Your separate `KeyGen.py` should implement:
+
+```text
+1. Create 6-byte buffer
+2. Get account length
+3. Loop through characters
+4. Convert character → ASCII
+5. ×27
+6. +61
+7. XOR 71
+8. + character index
+9. XOR account length
+10. XOR into buffer[j]
+11. Rotate j
+12. Convert buffer → hexadecimal
+13. Format as SENT-XXXX-XXXX-XXXX
+```
+
+This is directly supported by the walkthrough's documented algorithm. 
+
+---
+
+# Step 17 — Generate the admin key
+
+Once your `KeyGen.py` is saved:
+
+```bash
+python KeyGen.py
+```
+
+Use:
+
+```text
+admin
+```
+
+as the account name when the script asks.
+
+The result will be:
+
+```text
+SENT-XXXX-XXXX-XXXX
+```
+
+That is **not guessed**.
+
+It is mathematically generated from the algorithm we reversed.
+
+---
+
+# Step 18 — Why does the admin key work?
+
+This is the final connection:
+
+```text
+Website
+   ↓
+admin account
+   ↓
+license key
+   ↓
+server validates key
+   ↓
+server runs same derive_key()
+   ↓
+keys match
+   ↓
+license accepted
+```
+
+The validation function essentially does:
+
+```text
+derive_key(account)
+       ↓
+expected key
+       ↓
+strcmp(expected, supplied)
+```
+
+
+
+Therefore, if our Python implementation reproduces `derive_key()` correctly, the generated key should be accepted.
+
+---
+
+# Step 19 — Find the root flag
+
+The walkthrough states that the generated admin key unlocks the premium tier on the web portal and reveals the root flag. 
+
+So the final chain is:
+
+```text
+sentinel-activate
+       ↓
+strings
+       ↓
+symbols
+       ↓
+decode_token
+       ↓
+recover user flag
+       ↓
+derive_key
+       ↓
+reverse algorithm
+       ↓
+KeyGen.py
+       ↓
+generate admin key
+       ↓
+/activate
+       ↓
+admin/premium access
+       ↓
+ROOT FLAG
+```
+
+## 🧠 What you should be able to explain in your test
+
+If someone asks **"How did you find the admin license key?"**, don't say:
+
+> "I ran KeyGen.py."
+
+Say:
+
+> **"I first identified the `derive_key` function in the unstripped ARM64 binary. I traced its operations: multiplying each character by 27, adding 61, XORing with 71, adding the character index, XORing with the account length, and accumulating the results in a rotating 6-byte buffer. I reproduced that algorithm in Python and used it to generate the license key for the `admin` account."**
+
+That is the actual reverse-engineering explanation. 
+
