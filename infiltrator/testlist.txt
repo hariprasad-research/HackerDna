@@ -1,0 +1,6 @@
+password
+admin
+secret
+123456
+!!!secret!!!
+

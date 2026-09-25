@@ -188,7 +188,7 @@ recovered HS256 secret**.
 Use the decoder helper with the generated token:
 
 ``` bash
-python Decode.py "$(cat admin_jwt.txt)"
+python3 Decode.py "$(cat admin_jwt.txt)"
 ```
 
 Check that the payload contains:
