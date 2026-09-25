@@ -1,0 +1,34 @@
+import subprocess
+
+binary = "sentinel-activate"
+
+# g_token_enc file offset
+offset = 0xCC0
+
+# g_token_enc length
+length = 36
+
+with open(binary, "rb") as f:
+    f.seek(offset)
+    encrypted = f.read(length)
+
+print("[+] Encrypted bytes:")
+print(encrypted.hex())
+
+if len(encrypted) != 36:
+    print(f"[-] Expected 36 bytes, got {len(encrypted)}")
+    exit()
+
+decoded = bytes(b ^ 0x5A for b in encrypted)
+
+flag = decoded.decode()
+
+print("\n[+] Decoded User Flag:")
+print(flag)
+
+print("\n[+] Length:", len(flag))
+
+if len(flag) == 36 and flag.count("-") == 4:
+    print("[+] UUID format: OK")
+else:
+    print("[-] UUID format: WRONG")

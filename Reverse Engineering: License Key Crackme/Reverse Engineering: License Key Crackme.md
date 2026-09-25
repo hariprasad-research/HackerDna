@@ -50,213 +50,528 @@ A 70KB ARM64 binary, dynamically linked, **not stripped** — symbol names intac
 
 ---
 
-## Step 1 — Reconnaissance
+# Reverse Engineering — Sentinel Activate
 
-The lab presents a web portal — **Sentinel License Manager** — with:
-
-- A download link for the `sentinel-activate` binary
-- A trial license key (`SENT-3B00-1C47-EF00` for account `trial`)
-- A web form at `/activate` that validates license keys server-side
-
-**First move**: Download the binary and run `strings` to get a lay of the land.
+## 0. Enter the Challenge Directory
 
 ```bash
-$ file sentinel-activate
-sentinel-activate: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV),
-dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, not stripped
+cd ~/Desktop/HackerDna/"Reverse Engineering: License Key Crackme"
 ```
 
-Key strings found:
-- `decode_token`, `derive_key`, `validate`, `g_token_enc` — function names
-- `SENT-%c%c%c%c-%c%c%c%c-%c%c%c%c` — license key format
-- `--account`, `--key`, `--diag` — CLI arguments
-- `User Flag: %s` — hidden output
-- `g_token_enc` — a 36-byte obfuscated blob in `.rodata`
+Check the files:
+
+```bash
+ls
+```
+
+You should have:
+
+```text
+sentinel-activate
+```
 
 ---
 
-## Step 1 — Decoding the Hidden Token
+# PART A — Understand the Binary
 
-The symbol table revealed `g_token_enc` — a 36-byte blob at address `0x400cc0`. The `decode_token` function XORs each byte with `0x5A`:
+## 1. Identify the Binary
 
-```asm
-decode_token:
-  ldrb  w2, [x1, x0]      // load byte from g_token_enc
-  mov   w1, #0x5a          // XOR key
-  eor   w1, w2, w1         // XOR each byte with 0x5A
-  strb  w1, [x0]           // store decoded byte
-  // loop 36 times (0x23 = 35, so 0..35 = 36 bytes)
+```bash
+file sentinel-activate
 ```
 
-A quick Python one-liner reveals the decoded content — a UUID that serves as the user flag.
+Look for:
 
-**Insight**: XOR obfuscation is the simplest form of hiding data in a binary. It won't stop a determined analyst, but it prevents casual `strings` discovery. Always check `.rodata` for suspicious blobs when reverse engineering.
+```text
+ELF 64-bit
+ARM aarch64
+not stripped
+```
+
+### Why?
+
+- `aarch64` tells us the CPU architecture.
+- `not stripped` means useful function names may still be available.
 
 ---
 
-## Step 2 — Understanding the Validation Logic
+# PART B — Find Interesting Strings
 
-The `main` function parses three CLI flags:
-- `--account <name>` — the account to validate
-- `--key <SENT-XXXX-XXXX-XXXX>` — the license key
-- `--diag` — diagnostic mode that decodes and prints the hidden user flag
+## 2. Search Strings
 
-The `validate(account, key)` function:
-1. Calls `derive_key(account)` to compute the expected key
-2. Uppercases the input key
-3. Compares them with `strcmp`
+```bash
+strings sentinel-activate
+```
 
-## Step 3 — Reversing the Key Derivation Algorithm
+Better:
 
-The `derive_key` function is the heart of the challenge. Here's what it does:
+```bash
+strings sentinel-activate | grep -E 'decode_token|derive_key|validate|g_token_enc|User Flag|SENT-'
+```
 
-1. Initializes a 6-byte buffer to all zeros
-2. For each character in the account name, applies a series of transforms:
-   - Multiply by 27
-   - Add 61
-   - XOR with 71
-   - Add the character's position index
-   - XOR with the account name length
-3. XORs the result into a rotating 6-byte buffer (index wraps at 6)
-4. Converts the final 6-byte buffer to 12 hex characters
-5. Formats the result as `SENT-XXXX-XXXX-XXXX`
+Look for:
 
-The `validate` function then:
-1. Calls `derive_key(account)` to compute the expected key
-2. Uppercases the user-supplied key
-3. Compares them with `strcmp`
+```text
+decode_token
+derive_key
+validate
+g_token_enc
+User Flag: %s
+SENT-%c%c%c%c-%c%c%c%c-%c%c%c%c
+```
 
-## The Keygen
+### What this tells us
 
-With the algorithm understood, writing a keygen is straightforward:
+```text
+decode_token → probably handles hidden flag
+derive_key   → probably creates license key
+validate     → probably checks license
+```
+
+`User Flag: %s` is an important clue.
+
+---
+
+# PART C — Find Function Addresses
+
+## 3. List Symbols
+
+```bash
+aarch64-linux-gnu-objdump -t sentinel-activate | grep -E 'decode_token|derive_key|validate|main'
+```
+
+Example:
+
+```text
+400744  decode_token
+4007b0  derive_key
+4009f8  validate
+```
+
+You don't need to memorize the addresses.
+
+---
+
+# PART D — Find the User Flag
+
+## 4. Find `g_token_enc`
+
+```bash
+aarch64-linux-gnu-nm -a sentinel-activate | grep g_token_enc
+```
+
+You should find something similar to:
+
+```text
+0000000000400cc0 r g_token_enc
+```
+
+This means:
+
+```text
+g_token_enc
+    ↓
+address = 0x400cc0
+```
+
+This is the location of the **obfuscated User Flag data**.
+
+The challenge documentation identifies it as a **36-byte blob**.
+
+---
+
+## 5. Find the Section Containing It
+
+```bash
+aarch64-linux-gnu-objdump -h sentinel-activate | grep -E 'rodata|text|data'
+```
+
+Look for:
+
+```text
+.rodata
+```
+
+### Why?
+
+`g_token_enc` is stored in read-only data (`.rodata`).
+
+---
+
+## 6. Dump `.rodata`
+
+```bash
+aarch64-linux-gnu-objdump -s -j .rodata sentinel-activate
+```
+
+You'll see something similar to:
+
+```text
+400cb8  01000200 00000000 62633b3c 6c6e3c6d
+400cc8  77383938 3e776e63 6a3b7762 6f6e6877
+400cd8  3f386f3e 3f6a3f3e 6e6c393f 00000000
+```
+
+---
+
+## 7. Extract the Correct Bytes
+
+We found:
+
+```text
+g_token_enc = 0x400cc0
+```
+
+Therefore, start reading at:
+
+```text
+400cc0
+```
+
+**Do not include `400cc8` or `400cd8`.**
+
+Those are addresses printed by `objdump`, not data.
+
+The 36 bytes are:
+
+```text
+62633b3c6c6e3c6d773839383e776e636a3b77626f6e68773f386f3e3f6a3f3e6e6c393f
+```
+
+---
+
+## 8. Decode the Bytes
+
+`decode_token()` XORs each byte with:
+
+```text
+0x5A
+```
+
+Conceptually:
+
+```text
+encrypted byte
+      ↓
+   XOR 0x5A
+      ↓
+plain character
+```
+
+Run your helper:
+
+```bash
+python3 DecodeFlag.py
+```
+
+Or use:
 
 ```python
-def derive_key(account_name):
-    buf = [0] * 6
-    name_len = len(account_name)
-    j = 0
+binary = "sentinel-activate"
 
-    for i, c in enumerate(account_name):
-        c = ord(c)
-        c = (c << 1) + c       # multiply by 3
-        c = (c << 3) + c       # multiply by 27 total
-        c = (c + 0x3d) & 0xFF  # add 61
-        c = c ^ 0x47           # XOR with 71
-        c = (c + i) & 0xFF     # add character index
-        c = c ^ name_len       # XOR with name length
-        buf[j] = (buf[j] ^ c) & 0xFF
-        j = (j + 1) % 6
+offset = 0xCC0
+length = 36
 
-    # Convert 6-byte buffer to 12 hex chars
-    hex_chars = '0123456789ABCDEF'
-    result = ''
-    for b in buf:
-        result += hex_chars[(b >> 4) & 0xf]
-        result += hex_chars[b & 0xf]
-    return f'SENT-{result[0:4]}-{result[4:8]}-{result[8:12]}'
+with open(binary, "rb") as f:
+    f.seek(offset)
+    encrypted = f.read(length)
+
+decoded = bytes(b ^ 0x5A for b in encrypted)
+
+print("[+] User Flag:")
+print(decoded.decode())
 ```
 
-This keygen can forge a valid license key for **any** account name.
+Run:
 
----
-
-## Methodology
-
-### Phase 1 — Static Analysis
-
-**Tools**: `strings`, `aarch64-linux-gnu-objdump`
-
-The binary was not stripped, so all function names were preserved in the symbol table. This is a huge advantage — instead of guessing what each subroutine does, the names tell you directly:
-
-| Function | Address | Purpose |
-|----------|---------|---------|
-| `decode_token` | `0x400744` | XOR-decodes a 36-byte obfuscated blob |
-| `derive_key` | `0x4007b0` | Derives a license key from an account name |
-| `validate` | `0x4009f8` | Compares derived key against user input |
-| `main` | `0x400ac4` | Argument parsing and orchestration |
-
-**Insight**: Always check if a binary is stripped. Preserved symbol names are a massive time-saver — they tell you exactly what each function does.
-
-### Phase 2 — Understanding decode_token
-
-The `g_token_enc` blob at `0x400cc0` is 36 bytes of seemingly random data. The `decode_token` function XORs each byte with `0x5A`:
-
-```asm
-decode_token:
-  ldrb  w2, [x1, x0]      // load byte from g_token_enc
-  mov   w1, #0x5a          // XOR key
-  eor   w1, w2, w1         // XOR
-  strb  w1, [x0]           // store decoded byte
-  // loop 36 times
+```bash
+python3 DecodeFlag.py
 ```
 
-This is textbook XOR obfuscation — simple to implement, trivial to reverse. The decoded result is a UUID that serves as the user flag.
+Expected format:
 
-**Learning insight**: XOR obfuscation in `.rodata` is one of the most common hiding techniques in crackmes. It won't stop a determined analyst, but it prevents casual `strings` discovery. Always dump and inspect data sections when reverse engineering.
+```text
+xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
 
-### Phase 2 — Reversing the Key Derivation
-
-The `derive_key` function is the heart of the challenge. It transforms an account name into a 12-hex-character license key through a series of arithmetic and logical operations:
-
-1. **Initialize** a 6-byte rolling buffer to zero
-2. **For each character** in the account name:
-   - Multiply by 27
-   - Add 61
-   - XOR with 71
-   - Add the character's position index
-   - XOR with the account name length
-   - XOR into the rotating buffer position
-3. **Convert** the 6-byte buffer to 12 hex characters
-4. **Format** as `SENT-XXXX-XXXX-XXXX`
-
-The `validate` function then uppercases the user's input and compares it against the derived key using `strcmp`.
-
-### Phase 3 — The Admin Key
-
-With the keygen working, generating the admin key is trivial — just run `derive_key("admin")` and format the result. The admin key unlocks premium tier on the web portal and reveals the root flag.
+That is the **User Flag**.
 
 ---
 
-## Tools Used
+# PART E — Understand the License Key
 
-| Tool | Purpose |
-|------|---------|
-| `strings` | Initial reconnaissance of embedded strings and symbol names |
-| `aarch64-linux-gnu-objdump` | Full ARM64 disassembly with symbol table |
-| `qemu-user-static` | Running ARM64 binaries on x86_64 via user-mode emulation |
-| Python 3 | Writing the keygen and testing the algorithm |
-| `curl` | Interacting with the web activation endpoint |
+## 9. Inspect `derive_key`
 
-## Key Learning Insights
+```bash
+aarch64-linux-gnu-objdump -d sentinel-activate | less
+```
 
-### 1. Symbol names are your roadmap
-An unstripped binary gives you the function names for free. `decode_token`, `derive_key`, and `validate` tell you exactly what each subroutine does before you read a single instruction.
+Inside `less`:
 
-### 2. XOR obfuscation is everywhere in crackmes
-It's the simplest hiding technique — XOR each byte with a constant key. It stops `strings` but falls to the most basic static analysis. Always dump `.rodata` and look for suspicious blobs.
+```text
+/derive_key
+```
 
-### 3. ARM64 is approachable with the right tools
-The ARM64 instruction set is clean and regular. With `aarch64-linux-gnu-objdump` and a reference for instructions like `ubfiz`, `eor`, and `strb`, you can read the disassembly fluently even without hardware.
+Press Enter.
 
-### 4. Rolling XOR is a common key derivation pattern
-The 6-byte rolling buffer with XOR accumulation is a lightweight way to derive a fixed-size key from variable-length input. It's not cryptographically secure, but it's compact and fast — exactly what you'd expect in a license key validator.
+The function transforms:
+
+```text
+account name
+      ↓
+calculation
+      ↓
+6 bytes
+      ↓
+12 hexadecimal characters
+      ↓
+SENT-XXXX-XXXX-XXXX
+```
+
+Important operations:
+
+```text
+× 27
++ 61
+XOR 71
++ character index
+XOR account length
+rolling XOR into 6-byte buffer
+```
 
 ---
 
-## Lab Link
+## 10. Use `KeyGen.py`
 
-Try this challenge yourself: [https://hackerdna.com/labs/reverse-engineering-crackme](https://hackerdna.com/labs/reverse-engineering-crackme)
+The algorithm has been reproduced in Python.
+
+Run:
+
+```bash
+python3 KeyGen.py
+```
+
+It asks:
+
+```text
+Account name:
+```
+
+For a test account in the authorized lab, enter the account name.
+
+Example:
+
+```text
+admin
+```
+
+It produces:
+
+```text
+SENT-XXXX-XXXX-XXXX
+```
+
+This is **not brute force**. It is a reproduction of the `derive_key()` algorithm found in the binary.
 
 ---
 
-## Key Takeaways
+# PART F — Test the License
 
-1. **Always check if a binary is stripped** — preserved symbol names are a roadmap to the code.
-2. **Dump `.rodata`** — obfuscated data blobs (XOR, ROT, base64) are often hiding flags or keys.
-3. **ARM64 disassembly is readable** — with `objdump` and a reference for `ubfiz`, `eor`, and `strb`, you can trace through the logic without hardware.
-4. **Keygen is the goal** — understanding the algorithm well enough to reproduce it is the point of a crackme. Don't just patch the binary; write a generator.
-5. **Check for diagnostic modes** — the `--diag` flag was a deliberate easter egg that revealed the user flag directly.
+## 11. Make the Binary Executable
 
-## Lab Link
+If you get:
 
-Try this challenge yourself: [https://hackerdna.com/labs/reverse-engineering-crackme](https://hackerdna.com/labs/reverse-engineering-crackme)
+```text
+Permission denied
+```
+
+run:
+
+```bash
+chmod +x sentinel-activate
+```
+
+Then:
+
+```bash
+./sentinel-activate --account admin --key YOUR_KEY
+```
+
+Replace `YOUR_KEY` with the key generated by `KeyGen.py`.
+
+---
+
+# PART G — Get the Second Flag
+
+If the admin license is accepted, the program unlocks the privileged/premium path.
+
+Follow the challenge's activation flow and look for the **root/admin flag**.
+
+The important distinction is:
+
+```text
+                 sentinel-activate
+                       │
+          ┌────────────┴────────────┐
+          ↓                         ↓
+    decode_token()             derive_key()
+          ↓                         ↓
+     User Flag               Admin License Key
+                                    ↓
+                               validate()
+                                    ↓
+                              privileged access
+                                    ↓
+                              Root/Admin Flag
+```
+
+---
+
+# 🧠 What You Should Remember for a CTF
+
+You don't need to memorize every command.
+
+Remember this workflow:
+
+```text
+1. file
+      ↓
+2. strings
+      ↓
+3. objdump -t / nm
+      ↓
+4. Find interesting function/data
+      ↓
+5. Find address
+      ↓
+6. Dump section
+      ↓
+7. Extract bytes
+      ↓
+8. Understand the decoding algorithm
+      ↓
+9. Reproduce algorithm with Python
+      ↓
+10. Get flag
+```
+
+---
+
+# Most Important Commands
+
+### Identify the binary
+
+```bash
+file sentinel-activate
+```
+
+### Search useful strings
+
+```bash
+strings sentinel-activate | grep -E 'decode_token|derive_key|validate|g_token_enc|User Flag|SENT-'
+```
+
+### Find `g_token_enc`
+
+```bash
+aarch64-linux-gnu-nm -a sentinel-activate | grep g_token_enc
+```
+
+### Dump `.rodata`
+
+```bash
+aarch64-linux-gnu-objdump -s -j .rodata sentinel-activate
+```
+
+### Disassemble the binary
+
+```bash
+aarch64-linux-gnu-objdump -d sentinel-activate | less
+```
+
+### Run the flag decoder
+
+```bash
+python3 DecodeFlag.py
+```
+
+### Run the key generator
+
+```bash
+python3 KeyGen.py
+```
+
+### Make the binary executable
+
+```bash
+chmod +x sentinel-activate
+```
+
+---
+
+# Complete From-Scratch Workflow
+
+```text
+Enter challenge directory
+        ↓
+Identify binary with file
+        ↓
+Search strings
+        ↓
+Find useful symbols
+        ↓
+Locate g_token_enc
+        ↓
+Find .rodata
+        ↓
+Extract encoded bytes
+        ↓
+Understand decode_token()
+        ↓
+XOR bytes with 0x5A
+        ↓
+Recover User Flag
+        ↓
+Inspect derive_key()
+        ↓
+Understand key-generation operations
+        ↓
+Reproduce algorithm in Python
+        ↓
+Generate a test license key
+        ↓
+Validate in the authorized lab
+        ↓
+Observe the resulting lab output
+```
+
+---
+
+# Final Takeaway
+
+The key reverse-engineering concepts demonstrated by this lab are:
+
+1. **Identify the binary architecture**
+2. **Use strings for reconnaissance**
+3. **Use symbols when the binary is not stripped**
+4. **Locate interesting data and functions**
+5. **Understand how data is transformed**
+6. **Translate assembly logic into higher-level pseudocode**
+7. **Reimplement the discovered algorithm in Python**
+8. **Verify the result in the authorized CTF/lab environment**
+
+The important mindset is:
+
+```text
+Inspect
+  ↓
+Locate
+  ↓
+Disassemble
+  ↓
+Understand
+  ↓
+Reimplement
+  ↓
+Verify
+```
